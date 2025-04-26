@@ -1,0 +1,194 @@
+# Prerequest: asiayo namespace created
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: asiayo
+data:
+  primary.cnf: |
+    [mysqld]
+    server-id=1
+    log-bin=mysql-bin
+  replica.cnf: |
+    [mysqld]
+    server-id=2
+    
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: asiayo
+type: Opaque
+data:
+  # root123
+  mysql-root-password: cm9vdDEyMw==
+  # repl123
+  mysql-replication-password: cmVwbDEyMw==
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: asiayo
+spec:
+  selector:
+    matchLabels:
+      app: mysql
+  serviceName: mysql
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+          name: mysql
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: POD_HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d/
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["mysql", "-h", "127.0.0.1", "-e", "SELECT 1"]
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          timeoutSeconds: 1
+      volumes:
+      - name: conf
+        configMap:
+          name: mysql-config
+          items:
+          - key: primary.cnf
+            path: primary.cnf
+          - key: replica.cnf
+            path: replica.cnf
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: asiayo
+spec:
+  clusterIP: None  # Headless Service
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+
+  # 目前方案缺乏自動故障轉移機制且這樣的話，當 mysql-0 當掉時，會造成資料無法寫入，需要多加監控機制，以及mysql 內的資料同步機制
+  # 建議可以使用 MySQL Operator
+  # 以下是MySQL Operator 的設定
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-root-secret
+  namespace: asiayo
+type: Opaque
+data:
+  rootUser: cm9vdA==        # root
+  rootPassword: cm9vdDEyMw== # root123
+
+---
+apiVersion: mysql.oracle.com/v2
+kind: InnoDBCluster
+metadata:
+  name: mysql-cluster
+  namespace: asiayo
+spec:
+  secretName: mysql-root-secret
+  instances: 3  # 建議至少3個實例以實現真正的高可用
+  router:
+    instances: 2  # MySQL Router 實例數
+  version: "8.0.32"
+  edition: community
+  
+  tlsUseSelfSigned: true  # 使用自簽證書
+  
+  podSpec:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+    
+  datadirVolumeClaimTemplate:
+    accessModes: 
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 10Gi
+    
+  backupProfiles:
+    - name: backup-schedule
+      dumpInstance:
+        dumpOptions:
+          compression:
+            type: gzip
+      storage:
+        persistentVolumeClaim:
+          claimName: mysql-backup
+          
+  backupSchedules:
+    - name: backup-daily
+      schedule: "0 0 * * *" 
+      backupProfileName: backup-schedule
+      enabled: true
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-backup
+  namespace: asiayo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

@@ -1,0 +1,230 @@
+---
+# Storage Class for AWS EFS
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+  namespace: asiayo
+provisioner: efs.csi.aws.com
+---
+# PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: website-pvc
+  namespace: asiayo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: website
+  namespace: asiayo
+  labels:
+    app: website
+spec:
+  selector:
+    matchLabels:
+      app: website
+  template:
+    metadata:
+      labels:
+        app: website
+    spec:
+      containers:
+      - name: website
+        image: nginx:latest #replace to asiayo image
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: website-storage
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: website-storage
+        persistentVolumeClaim:
+          claimName: website-pvc
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: website-service
+  namespace: asiayo
+spec:
+  type: LoadBalancer
+  selector:
+    app: website
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+# HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: website-hpa
+  namespace: asiayo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: website
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+
+# 這樣的方案若有多個服務時可能需要建立很多 elb 
+# 可以改用 istio virtual service 的方式
+
+---
+# Storage Class for AWS EFS
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+  namespace: asiayo
+provisioner: efs.csi.aws.com
+---
+# PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: website-pvc
+  namespace: asiayo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: website
+  labels:
+    app: website
+spec:
+  selector:
+    matchLabels:
+      app: website
+  template:
+    metadata:
+      labels:
+        app: website
+    spec:
+      containers:
+      - name: website
+        image: nginx:latest  #replace to asiayo image
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: website-storage
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: website-storage
+        persistentVolumeClaim:
+          claimName: website-pvc
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: website-service
+spec:
+  selector:
+    app: website
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+---
+# Istio Virtual Service
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: website-vs
+spec:
+  hosts:
+  - "asiayo.com"
+  gateways:
+  - website-gateway
+  http:
+  - route:
+    - destination:
+        host: website-service
+        port:
+          number: 80
+---
+# Istio Gateway
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: website-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    -  "asiayo.com"
+---
+# HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: website-hpa
+  namespace: asiayo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: website
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
